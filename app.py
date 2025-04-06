@@ -621,6 +621,7 @@ def show_dashboard_page(user_id):
         
         styled_df = recent_df[['date', 'type', 'amount', 'category', 'note']].style.apply(highlight_rows, axis=1)
         st.dataframe(styled_df, use_container_width=True)
+# Corrected get_user_transactions function to align with the database schema
 def get_user_transactions(user_id):
     """
     Retrieve all transactions for a specific user from the database.
@@ -630,25 +631,25 @@ def get_user_transactions(user_id):
     
     Returns:
     pandas.DataFrame: DataFrame containing the user's transactions
-"""
-    conn = sqlite3.connect('expense_tracker.db')
+    """
+    conn = sqlite3.connect(get_db_path())
     
     # Query to get all transactions for the specified user
     query = """
     SELECT 
-        t.id, 
-        t.date, 
-        t.description, 
-        t.amount, 
-        c.name as category
+        id, 
+        user_id,
+        type,
+        amount, 
+        category,
+        date,
+        note
     FROM 
-        transactions t
-    JOIN 
-        categories c ON t.category_id = c.id
+        transactions 
     WHERE 
-        t.user_id = ?
+        user_id = ?
     ORDER BY 
-        t.date DESC
+        date DESC
     """
     
     # Execute query and load results into a DataFrame
@@ -656,10 +657,14 @@ def get_user_transactions(user_id):
     
     conn.close()
     
+    if not transactions_df.empty:
+        transactions_df['date'] = pd.to_datetime(transactions_df['date'])
+    
     return transactions_df
 
-
+# Corrected show_transactions_page function
 def show_transactions_page(user_id):
+    """Show the transactions page with list of transactions and add/delete options"""
     st.header("Transactions")
     
     # Retrieve all transactions for the user
@@ -668,21 +673,51 @@ def show_transactions_page(user_id):
     # Add a new transaction form
     with st.expander("Add New Transaction"):
         with st.form("new_transaction_form"):
-            date = st.date_input("Date")
-            description = st.text_input("Description")
+            transaction_type = st.selectbox("Transaction Type", ["expense", "income"])
+            
+            # Get categories for the selected transaction type
+            categories_df = get_categories(transaction_type)
+            category_list = categories_df['name'].tolist() if not categories_df.empty else []
+            
+            date = st.date_input("Date", datetime.now())
             amount = st.number_input("Amount", min_value=0.01, step=0.01)
-            category = st.selectbox("Category", get_categories())
+            category = st.selectbox("Category", category_list)
+            note = st.text_area("Note (Optional)")
             
             submitted = st.form_submit_button("Add Transaction")
             if submitted:
-                add_transaction(user_id, date, description, amount, category)
-                st.success("Transaction added successfully!")
-                st.experimental_rerun()
+                if add_transaction(
+                    user_id, 
+                    transaction_type, 
+                    amount, 
+                    category, 
+                    date.strftime('%Y-%m-%d'), 
+                    note
+                ):
+                    st.success("Transaction added successfully!")
+                    st.rerun()
     
     # Display all transactions in a table
     if not transactions_df.empty:
         st.subheader("Your Transactions")
-        st.dataframe(transactions_df[['date', 'description', 'amount', 'category']])
+        
+        # Format the display dataframe
+        display_df = transactions_df.copy()
+        display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
+        display_df['formatted_amount'] = display_df.apply(
+            lambda x: f"${x['amount']:.2f}" if x['type'] == 'income' else f"-${x['amount']:.2f}", 
+            axis=1
+        )
+        
+        # Color-code transaction types
+        def highlight_rows(row):
+            if row['type'] == 'income':
+                return ['background-color: rgba(46, 204, 113, 0.2)']*len(row)
+            else:
+                return ['background-color: rgba(231, 76, 60, 0.2)']*len(row)
+        
+        styled_df = display_df[['date', 'type', 'formatted_amount', 'category', 'note']].style.apply(highlight_rows, axis=1)
+        st.dataframe(styled_df, use_container_width=True)
         
         # Delete transaction option
         with st.expander("Delete a Transaction"):
@@ -691,11 +726,10 @@ def show_transactions_page(user_id):
                 # Get the row that matches this transaction ID
                 row = transactions_df[transactions_df['id'] == transaction_id].iloc[0]
                 
-                # Convert numpy.datetime64 to pandas datetime and format it
-                date_str = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
-                
-                # Format the entire string with date, description and amount
-                return f"{date_str} - {row['description']} (${float(row['amount']):.2f})"
+                # Format the entire string with date, category and amount
+                date_str = row['date'].strftime('%Y-%m-%d')
+                amount_str = f"${float(row['amount']):.2f}"
+                return f"{date_str} - {row['category']} ({amount_str})"
             
             transaction_to_delete = st.selectbox(
                 "Select transaction to delete",
@@ -706,7 +740,7 @@ def show_transactions_page(user_id):
             if st.button("Delete Transaction"):
                 delete_transaction(transaction_to_delete)
                 st.success("Transaction deleted successfully!")
-                st.experimental_rerun()
+                st.rerun()
     else:
         st.info("No transactions found. Add your first transaction above.")
 def show_reports_page(user_id):
