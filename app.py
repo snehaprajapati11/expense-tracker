@@ -6,6 +6,9 @@ import plotly.express as px
 from datetime import datetime
 import io
 import os
+import uuid
+import csv
+from pathlib import Path
 
 # Page configuration
 st.set_page_config(
@@ -15,9 +18,48 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom CSS
+st.markdown("""
+<style>
+    .admin-badge {
+        background-color: #FF4B4B;
+        color: white;
+        padding: 0.2rem 0.6rem;
+        border-radius: 0.5rem;
+        font-size: 0.8rem;
+        font-weight: bold;
+    }
+    .user-badge {
+        background-color: #0068C9;
+        color: white;
+        padding: 0.2rem 0.6rem;
+        border-radius: 0.5rem;
+        font-size: 0.8rem;
+        font-weight: bold;
+    }
+    .stMetric {
+        background-color: #f0f2f6;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # Database initialization
+def get_db_path():
+    """Get the database path - works locally and on Streamlit Cloud"""
+    if os.path.exists('/mount/data'):
+        # Streamlit Cloud persistent storage
+        Path('/mount/data').mkdir(exist_ok=True)
+        return '/mount/data/expense_tracker.db'
+    else:
+        # Local development
+        return 'expense_tracker.db'
+
 def init_db():
-    conn = sqlite3.connect('expense_tracker.db')
+    """Initialize the database with required tables"""
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     
     # Create users table if not exists
@@ -25,7 +67,9 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
-        password_hash TEXT
+        password_hash TEXT,
+        is_admin INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )
     ''')
     
@@ -39,6 +83,7 @@ def init_db():
         category TEXT,
         date TEXT,
         note TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id)
     )
     ''')
@@ -49,15 +94,50 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         amount REAL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id)
     )
     ''')
     
+    # Create categories table if not exists
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        type TEXT,
+        is_default INTEGER DEFAULT 0
+    )
+    ''')
+    
+    # Insert default admin if not exists
+    c.execute("SELECT id FROM users WHERE username = 'admin'")
+    if not c.fetchone():
+        hashed_password = bcrypt.hashpw('admin123'.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        c.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)", ('admin', hashed_password))
+    
+    # Insert default categories if not exists
+    c.execute("SELECT id FROM categories LIMIT 1")
+    if not c.fetchone():
+        default_categories = [
+            ('Food', 'expense', 1),
+            ('Transportation', 'expense', 1),
+            ('Housing', 'expense', 1),
+            ('Utilities', 'expense', 1),
+            ('Entertainment', 'expense', 1),
+            ('Healthcare', 'expense', 1),
+            ('Shopping', 'expense', 1),
+            ('Other', 'expense', 1),
+            ('Salary', 'income', 1),
+            ('Bonus', 'income', 1),
+            ('Gift', 'income', 1),
+            ('Investment', 'income', 1),
+            ('Other', 'income', 1)
+        ]
+        c.executemany("INSERT INTO categories (name, type, is_default) VALUES (?, ?, ?)", default_categories)
+    
     conn.commit()
     conn.close()
-
-# Call DB initialization
-init_db()
 
 # Authentication functions
 def hash_password(password):
@@ -70,9 +150,9 @@ def verify_password(password, hashed):
     """Verify a password against a hash"""
     return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
-def register_user(username, password):
+def register_user(username, password, is_admin=0):
     """Register a new user"""
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     
     # Check if username already exists
@@ -83,35 +163,51 @@ def register_user(username, password):
     
     # Hash the password and insert the new user
     hashed_password = hash_password(password)
-    c.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hashed_password))
+    c.execute("INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)", 
+             (username, hashed_password, is_admin))
+    
+    user_id = c.lastrowid
     conn.commit()
     conn.close()
-    return True, "Registration successful!"
+    return True, user_id
 
 def login_user(username, password):
     """Login a user"""
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     
     # Fetch user data
-    c.execute("SELECT id, password_hash FROM users WHERE username = ?", (username,))
+    c.execute("SELECT id, password_hash, is_admin FROM users WHERE username = ?", (username,))
     user_data = c.fetchone()
     conn.close()
     
     if not user_data:
         return False, "Username not found!"
     
-    user_id, stored_hash = user_data
+    user_id, stored_hash, is_admin = user_data
     
     if verify_password(password, stored_hash):
-        return True, user_id
+        return True, user_id, is_admin
     else:
-        return False, "Incorrect password!"
+        return False, "Incorrect password!", None
+
+def is_user_admin(user_id):
+    """Check if a user is an admin"""
+    conn = sqlite3.connect(get_db_path())
+    c = conn.cursor()
+    
+    c.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    
+    if result:
+        return bool(result[0])
+    return False
 
 # Data handling functions
 def add_transaction(user_id, transaction_type, amount, category, date, note):
     """Add a new transaction to the database"""
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     
     c.execute("""
@@ -123,12 +219,23 @@ def add_transaction(user_id, transaction_type, amount, category, date, note):
     conn.close()
     return True
 
-def get_transactions(user_id, start_date=None, end_date=None):
-    """Get transactions for a user with optional date filtering"""
-    conn = sqlite3.connect('expense_tracker.db')
+def get_transactions(user_id, start_date=None, end_date=None, all_users=False):
+    """Get transactions with optional filtering"""
+    conn = sqlite3.connect(get_db_path())
     
-    query = "SELECT id, type, amount, category, date, note FROM transactions WHERE user_id = ?"
-    params = [user_id]
+    if all_users:
+        query = """
+        SELECT t.id, t.user_id, u.username, t.type, t.amount, t.category, t.date, t.note 
+        FROM transactions t JOIN users u ON t.user_id = u.id
+        """
+        params = []
+    else:
+        query = """
+        SELECT id, user_id, type, amount, category, date, note 
+        FROM transactions 
+        WHERE user_id = ?
+        """
+        params = [user_id]
     
     if start_date and end_date:
         query += " AND date BETWEEN ? AND ?"
@@ -145,13 +252,14 @@ def get_transactions(user_id, start_date=None, end_date=None):
 
 def set_budget(user_id, amount):
     """Set or update a user's monthly budget"""
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     
     # Check if budget already exists
     c.execute("SELECT id FROM budgets WHERE user_id = ?", (user_id,))
     if c.fetchone():
-        c.execute("UPDATE budgets SET amount = ? WHERE user_id = ?", (amount, user_id))
+        c.execute("UPDATE budgets SET amount = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?", 
+                 (amount, user_id))
     else:
         c.execute("INSERT INTO budgets (user_id, amount) VALUES (?, ?)", (user_id, amount))
     
@@ -161,7 +269,7 @@ def set_budget(user_id, amount):
 
 def get_budget(user_id):
     """Get a user's monthly budget"""
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     
     c.execute("SELECT amount FROM budgets WHERE user_id = ?", (user_id,))
@@ -174,7 +282,7 @@ def get_budget(user_id):
 
 def delete_transaction(transaction_id):
     """Delete a transaction"""
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     
     c.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
@@ -183,8 +291,154 @@ def delete_transaction(transaction_id):
     conn.close()
     return True
 
+def get_all_users():
+    """Get all users (for admin panel)"""
+    conn = sqlite3.connect(get_db_path())
+    query = """
+    SELECT u.id, u.username, u.is_admin, u.created_at,
+           COUNT(t.id) as transaction_count,
+           COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0) as total_expenses,
+           COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0) as total_income,
+           COALESCE(b.amount, 0) as budget
+    FROM users u
+    LEFT JOIN transactions t ON u.id = t.user_id
+    LEFT JOIN budgets b ON u.id = b.user_id
+    GROUP BY u.id
+    """
+    
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    
+    return df
+
+def delete_user(user_id):
+    """Delete a user and all associated data"""
+    conn = sqlite3.connect(get_db_path())
+    c = conn.cursor()
+    
+    # Delete user's transactions
+    c.execute("DELETE FROM transactions WHERE user_id = ?", (user_id,))
+    
+    # Delete user's budget
+    c.execute("DELETE FROM budgets WHERE user_id = ?", (user_id,))
+    
+    # Delete the user
+    c.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+def toggle_admin_status(user_id, is_admin):
+    """Toggle admin status for a user"""
+    conn = sqlite3.connect(get_db_path())
+    c = conn.cursor()
+    
+    c.execute("UPDATE users SET is_admin = ? WHERE id = ?", (1 if is_admin else 0, user_id))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+def get_categories(transaction_type=None):
+    """Get all categories or categories of a specific type"""
+    conn = sqlite3.connect(get_db_path())
+    
+    if transaction_type:
+        query = "SELECT id, name FROM categories WHERE type = ? ORDER BY name"
+        df = pd.read_sql_query(query, conn, params=[transaction_type])
+    else:
+        query = "SELECT id, name, type FROM categories ORDER BY type, name"
+        df = pd.read_sql_query(query, conn)
+    
+    conn.close()
+    return df
+
+def add_category(name, category_type):
+    """Add a new category"""
+    conn = sqlite3.connect(get_db_path())
+    c = conn.cursor()
+    
+    # Check if category already exists
+    c.execute("SELECT id FROM categories WHERE name = ? AND type = ?", (name, category_type))
+    if c.fetchone():
+        conn.close()
+        return False, "Category already exists!"
+    
+    c.execute("INSERT INTO categories (name, type) VALUES (?, ?)", (name, category_type))
+    
+    conn.commit()
+    conn.close()
+    return True, "Category added successfully!"
+
+def delete_category(category_id):
+    """Delete a category if it's not a default one"""
+    conn = sqlite3.connect(get_db_path())
+    c = conn.cursor()
+    
+    # Check if it's a default category
+    c.execute("SELECT is_default FROM categories WHERE id = ?", (category_id,))
+    result = c.fetchone()
+    
+    if result and result[0] == 1:
+        conn.close()
+        return False, "Cannot delete default categories!"
+    
+    c.execute("DELETE FROM categories WHERE id = ?", (category_id,))
+    
+    conn.commit()
+    conn.close()
+    return True, "Category deleted successfully!"
+
+def backup_database():
+    """Create backup of database tables in CSV format"""
+    tables = ['users', 'transactions', 'budgets', 'categories']
+    backup_files = {}
+    
+    conn = sqlite3.connect(get_db_path())
+    
+    for table in tables:
+        # Create a StringIO object to store CSV data
+        csv_data = io.StringIO()
+        
+        # Query the table
+        df = pd.read_sql_query(f"SELECT * FROM {table}", conn)
+        
+        # Convert to CSV
+        df.to_csv(csv_data, index=False)
+        
+        # Add to backup files
+        backup_files[f"{table}.csv"] = csv_data.getvalue()
+    
+    conn.close()
+    
+    return backup_files
+
+def import_data_from_csv(file, table):
+    """Import data from CSV into specified table"""
+    try:
+        # Read CSV
+        df = pd.read_csv(file)
+        
+        # Connect to database
+        conn = sqlite3.connect(get_db_path())
+        
+        # Get existing table structure
+        existing_cols = pd.read_sql_query(f"PRAGMA table_info({table})", conn)['name'].tolist()
+        
+        # Filter the dataframe to only include columns in the table
+        df = df[[col for col in df.columns if col in existing_cols]]
+        
+        # Insert data into table
+        df.to_sql(table, conn, if_exists='append', index=False)
+        
+        conn.close()
+        return True, f"Successfully imported data into {table}"
+    except Exception as e:
+        return False, f"Error importing data: {str(e)}"
+
 # UI Components
-def show_landing_page():
+def show_login_page():
     """Show the landing page with login and signup options"""
     col1, col2, col3 = st.columns([1, 2, 1])
     
@@ -192,7 +446,7 @@ def show_landing_page():
         st.markdown("<h1 style='text-align: center;'>💰 Expense Tracker</h1>", unsafe_allow_html=True)
         st.markdown("<p style='text-align: center;'>Track your expenses, set budgets, and gain financial insights</p>", unsafe_allow_html=True)
         
-        option = st.radio("", ["Login", "Sign Up"], horizontal=True)
+        option = st.radio("", ["Login", "Sign Up"], horizontal=True, label_visibility="collapsed")
         
         if option == "Login":
             with st.form("login_form"):
@@ -202,12 +456,13 @@ def show_landing_page():
                 
                 if submit:
                     if username and password:
-                        success, result = login_user(username, password)
+                        success, result, is_admin = login_user(username, password)
                         if success:
                             st.session_state['logged_in'] = True
                             st.session_state['user_id'] = result
                             st.session_state['username'] = username
-                            st.experimental_rerun()
+                            st.session_state['is_admin'] = is_admin
+                            st.rerun()
                         else:
                             st.error(result)
                     else:
@@ -227,27 +482,34 @@ def show_landing_page():
                         else:
                             success, message = register_user(new_username, new_password)
                             if success:
-                                st.success(message)
+                                st.success("Registration successful!")
                                 st.info("Please login with your new credentials.")
                             else:
                                 st.error(message)
                     else:
                         st.error("Please fill in all fields!")
 
-def show_dashboard(user_id, username):
+def show_dashboard(user_id, username, is_admin):
     """Show the main dashboard after login"""
     # Sidebar for navigation
     st.sidebar.title(f"Welcome, {username}!")
     
+    if is_admin:
+        st.sidebar.markdown("<span class='admin-badge'>Admin</span>", unsafe_allow_html=True)
+    else:
+        st.sidebar.markdown("<span class='user-badge'>User</span>", unsafe_allow_html=True)
+    
     # Create navigation
-    page = st.sidebar.radio("Navigation", ["Dashboard", "Transactions", "Reports", "Settings"])
+    if is_admin:
+        page = st.sidebar.radio("Navigation", ["Dashboard", "Transactions", "Reports", "Admin Panel", "Settings"])
+    else:
+        page = st.sidebar.radio("Navigation", ["Dashboard", "Transactions", "Reports", "Settings"])
     
     # Logout button
     if st.sidebar.button("Logout"):
-        st.session_state['logged_in'] = False
-        st.session_state['user_id'] = None
-        st.session_state['username'] = None
-        st.experimental_rerun()
+        for key in st.session_state.keys():
+            del st.session_state[key]
+        st.rerun()
     
     # Display selected page
     if page == "Dashboard":
@@ -256,6 +518,8 @@ def show_dashboard(user_id, username):
         show_transactions_page(user_id)
     elif page == "Reports":
         show_reports_page(user_id)
+    elif page == "Admin Panel" and is_admin:
+        show_admin_panel()
     elif page == "Settings":
         show_settings_page(user_id)
 
@@ -309,12 +573,11 @@ def show_dashboard_page(user_id):
             amount = st.number_input("Amount", min_value=0.01, format="%.2f")
             
         with col2:
-            categories = {
-                "expense": ["Food", "Transportation", "Housing", "Utilities", "Entertainment", "Healthcare", "Shopping", "Other"],
-                "income": ["Salary", "Bonus", "Gift", "Investment", "Other"]
-            }
+            # Get categories from database
+            categories_df = get_categories(transaction_type)
+            category_list = categories_df['name'].tolist() if not categories_df.empty else []
             
-            category = st.selectbox("Category", categories[transaction_type])
+            category = st.selectbox("Category", category_list)
             date = st.date_input("Date", datetime.now())
         
         note = st.text_area("Note (Optional)", height=100)
@@ -334,7 +597,7 @@ def show_dashboard_page(user_id):
                 )
                 if success:
                     st.success("Transaction added successfully!")
-                    st.experimental_rerun()
+                    st.rerun()
     
     # Recent transactions
     st.subheader("Recent Transactions")
@@ -348,11 +611,16 @@ def show_dashboard_page(user_id):
             axis=1
         )
         recent_df['date'] = recent_df['date'].dt.strftime('%Y-%m-%d')
-        st.dataframe(
-            recent_df[['date', 'type', 'amount', 'category', 'note']],
-            use_container_width=True,
-            hide_index=True
-        )
+        
+        # Color-code transaction types
+        def highlight_rows(row):
+            if row['type'] == 'income':
+                return ['background-color: rgba(46, 204, 113, 0.2)']*len(row)
+            else:
+                return ['background-color: rgba(231, 76, 60, 0.2)']*len(row)
+        
+        styled_df = recent_df[['date', 'type', 'amount', 'category', 'note']].style.apply(highlight_rows, axis=1)
+        st.dataframe(styled_df, use_container_width=True)
 
 def show_transactions_page(user_id):
     """Show all transactions with filtering options"""
@@ -382,11 +650,15 @@ def show_transactions_page(user_id):
         )
         transactions_display['date'] = transactions_display['date'].dt.strftime('%Y-%m-%d')
         
-        st.dataframe(
-            transactions_display[['date', 'type', 'amount', 'category', 'note']],
-            use_container_width=True,
-            hide_index=True
-        )
+        # Color-code transaction types
+        def highlight_rows(row):
+            if row['type'] == 'income':
+                return ['background-color: rgba(46, 204, 113, 0.2)']*len(row)
+            else:
+                return ['background-color: rgba(231, 76, 60, 0.2)']*len(row)
+        
+        styled_df = transactions_display[['date', 'type', 'amount', 'category', 'note']].style.apply(highlight_rows, axis=1)
+        st.dataframe(styled_df, use_container_width=True)
         
         # Delete transaction option
         with st.expander("Delete a Transaction"):
@@ -399,7 +671,7 @@ def show_transactions_page(user_id):
             if st.button("Delete Transaction"):
                 if delete_transaction(transaction_to_delete):
                     st.success("Transaction deleted successfully!")
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.error("Failed to delete transaction!")
         
@@ -531,44 +803,359 @@ def show_reports_page(user_id):
     else:
         st.info("Not enough data for monthly trend visualization.")
 
+def show_admin_panel():
+    """Show admin panel for user management and system settings"""
+    st.title("Admin Panel")
+    
+    # Create tabs for different admin functions
+    tab1, tab2, tab3, tab4 = st.tabs(["User Management", "Category Management", "Data Backup", "System Stats"])
+    
+    # Tab 1: User Management
+    with tab1:
+        st.subheader("User Management")
+        
+        # Get all users
+        users_df = get_all_users()
+        
+        if not users_df.empty:
+            # Display user stats with badges for admin
+            for _, row in users_df.iterrows():
+                with st.container():
+                    col1, col2, col3 = st.columns([3, 2, 1])
+                    
+                    with col1:
+                        if row['is_admin']:
+                            st.markdown(f"### {row['username']} <span class='admin-badge'>Admin</span>", unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"### {row['username']} <span class='user-badge'>User</span>", unsafe_allow_html=True)
+                        st.text(f"Joined: {row['created_at']}")
+                    
+                    with col2:
+                        st.markdown(f"**Transactions:** {row['transaction_count']}")
+                        st.markdown(f"**Total Expenses:** ${row['total_expenses']:.2f}")
+                        st.markdown(f"**Total Income:** ${row['total_income']:.2f}")
+                        st.markdown(f"**Budget:** ${row['budget']:.2f}")
+                    
+                    with col3:
+                        if row['username'] != 'admin':  # Prevent modifying the default admin
+                            # Toggle admin status
+                            admin_status = st.checkbox("Admin", value=bool(row['is_admin']), key=f"admin_{row['id']}")
+                            
+                            if admin_status != bool(row['is_admin']):
+                                if toggle_admin_status(row['id'], admin_status):
+                                    st.success(f"Updated admin status for {row['username']}")
+                                    st.rerun()
+                            
+                            # Delete user button
+                            if st.button("Delete", key=f"delete_{row['id']}"):
+                                if st.session_state.get('delete_confirmation') == row['id']:
+                                    # Confirmed, delete the user
+                                    if delete_user(row['id']):
+                                        st.success(f"User {row['username']} deleted successfully!")
+                                        st.rerun()
+                                    else:
+                                        st.error("Failed to delete user!")
+                                else:
+                                    # Ask for confirmation
+                                    st.session_state['delete_confirmation'] = row['id']
+                                    st.warning(f"Click again to confirm deletion of {row['username']} and all their data.")
+                    
+                    st.divider()
+        else:
+            st.info("No users found.")
+        
+        # Add new user form
+        with st.expander("Add New User"):
+            with st.form("add_user_form"):
+                new_username = st.text_input("Username")
+                new_password = st.text_input("Password", type="password")
+                is_admin = st.checkbox("Admin Privileges")
+                
+                submit = st.form_submit_button("Add User")
+                
+                if submit:
+                    if new_username and new_password:
+                        success, message = register_user(new_username, new_password, 1 if is_admin else 0)
+                        if success:
+                            st.success(f"User {new_username} added successfully!")
+                            st.rerun()
+                        else:
+                            st.error(message)
+                    else:
+                        st.error("Please enter both username and password!")
+    
+    # Tab 2: Category Management
+    with tab2:
+        st.subheader("Category Management")
+        
+        # Get all categories
+        categories_df = get_categories()
+        
+        if not categories_df.empty:
+            # Display categories grouped by type
+            expense_categories = categories_df[categories_df['type'] == 'expense']
+            income_categories = categories_df[categories_df['type'] == 'income']
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("### Expense Categories")
+                for _, row in expense_categories.iterrows():
+                    col_name, col_action = st.columns([3, 1])
+                    col_name.text(row['name'])
+                    if not row.get('is_default', 0):  # Only allow deletion of non-default categories
+                        if col_action.button("Delete", key=f"del_exp_{row['id']}"):
+                            success, message = delete_category(row['id'])
+                            if success:
+                                st.success(message)
+                                st.rerun()
+                            else:
+                                st.error(message)
+            
+            with col2:
+                st.markdown("### Income Categories")
+                for _, row in income_categories.iterrows():
+                    col_name, col_action = st.columns([3, 1])
+                    col_name.text(row['name'])
+                    if not row.get('is_default', 0):  # Only allow deletion of non-default categories
+                        if col_action.button("Delete", key=f"del_inc_{row['id']}"):
+                            success, message = delete_category(row['id'])
+                            if success:
+                                st.success(message)
+                                st.rerun()
+                            else:
+                                st.error(message)
+        
+        # Add new category form
+        with st.expander("Add New Category"):
+            with st.form("add_category_form"):
+                category_name = st.text_input("Category Name")
+                category_type = st.selectbox("Category Type", ["expense", "income"])
+                
+                submit = st.form_submit_button("Add Category")
+                
+                if submit:
+                    if category_name:
+                        success, message = add_category(category_name, category_type)
+                        if success:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.error(message)
+                    else:
+                        st.error("Please enter a category name!")
+    
+    # Tab 3: Data Backup
+    with tab3:
+        st.subheader("Data Backup & Import")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### Export Database")
+            if st.button("Generate Backup"):
+                backup_files = backup_database()
+                
+                for filename, content in backup_files.items():
+                    st.download_button(
+                        label=f"Download {filename}",
+                        data=content,
+                        file_name=filename,
+                        mime="text/csv",
+                        key=f"download_{filename}"
+                    )
+        
+        with col2:
+            st.markdown("### Import Data")
+            table_to_import = st.selectbox("Select table to import into", 
+                                       ["users", "transactions", "budgets", "categories"])
+            uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+            
+            if uploaded_file is not None:
+                if st.button("Import Data"):
+                    success, message = import_data_from_csv(uploaded_file, table_to_import)
+                    if success:
+                        st.success(message)
+                    else:
+                        st.error(message)
+    
+    # Tab 4: System Stats
+    with tab4:
+        st.subheader("System Statistics")
+        
+        # Connect to the database
+        conn = sqlite3.connect(get_db_path())
+        c = conn.cursor()
+        
+        # Get system stats
+        c.execute("SELECT COUNT(*) FROM users")
+        user_count = c.fetchone()[0]
+        
+        c.execute("SELECT COUNT(*) FROM transactions")
+        transaction_count = c.fetchone()[0]
+        
+        c.execute("SELECT SUM(amount) FROM transactions WHERE type = 'expense'")
+        total_expenses = c.fetchone()[0] or 0
+        
+        c.execute("SELECT SUM(amount) FROM transactions WHERE type = 'income'")
+        total_income = c.fetchone()[0] or 0
+        
+        c.execute("SELECT COUNT(*) FROM categories")
+        category_count = c.fetchone()[0]
+        
+        c.execute("SELECT date FROM transactions ORDER BY date DESC LIMIT 1")
+        latest_transaction = c.fetchone()
+        latest_transaction_date = latest_transaction[0] if latest_transaction else "No transactions"
+        
+        conn.close()
+        
+        # Display stats
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Users", user_count)
+            st.metric("Total Transactions", transaction_count)
+        
+        with col2:
+            st.metric("Total System Expenses", f"${total_expenses:.2f}")
+            st.metric("Total System Income", f"${total_income:.2f}")
+        
+        with col3:
+            st.metric("Total Categories", category_count)
+            st.metric("Latest Transaction", latest_transaction_date)
+        
+        # System health check
+        st.markdown("### System Health")
+        db_size = os.path.getsize(get_db_path()) / (1024 * 1024)  # Convert to MB
+        
+        if db_size < 50:
+            st.success(f"Database size: {db_size:.2f} MB - Good condition")
+        elif db_size < 100:
+            st.warning(f"Database size: {db_size:.2f} MB - Consider optimizing soon")
+        else:
+            st.error(f"Database size: {db_size:.2f} MB - Database is large, consider archiving old data")
+
 def show_settings_page(user_id):
-    """Show settings for the user"""
+    """Show settings page for user preferences and account settings"""
     st.title("Settings")
     
-    # Budget settings
-    st.subheader("Monthly Budget")
+    # Create tabs for different settings
+    tab1, tab2 = st.tabs(["Account Settings", "Preferences"])
     
-    current_budget = get_budget(user_id)
+    # Tab 1: Account Settings
+    with tab1:
+        st.subheader("Account Settings")
+        
+        # Change password
+        with st.expander("Change Password"):
+            with st.form("change_password_form"):
+                current_password = st.text_input("Current Password", type="password")
+                new_password = st.text_input("New Password", type="password")
+                confirm_password = st.text_input("Confirm New Password", type="password")
+                
+                submit = st.form_submit_button("Change Password")
+                
+                if submit:
+                    if not (current_password and new_password and confirm_password):
+                        st.error("Please fill in all fields!")
+                    elif new_password != confirm_password:
+                        st.error("New passwords do not match!")
+                    else:
+                        # Verify current password
+                        conn = sqlite3.connect(get_db_path())
+                        c = conn.cursor()
+                        
+                        c.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,))
+                        stored_hash = c.fetchone()[0]
+                        
+                        if verify_password(current_password, stored_hash):
+                            # Update with new password
+                            new_hash = hash_password(new_password)
+                            c.execute("UPDATE users SET password_hash = ? WHERE id = ?", (new_hash, user_id))
+                            conn.commit()
+                            conn.close()
+                            
+                            st.success("Password changed successfully!")
+                        else:
+                            conn.close()
+                            st.error("Current password is incorrect!")
+        
+        # Delete account
+        with st.expander("Delete Account"):
+            st.warning("⚠️ This action cannot be undone. All your data will be permanently deleted.")
+            
+            with st.form("delete_account_form"):
+                confirm_text = st.text_input("Type 'DELETE' to confirm")
+                password = st.text_input("Enter your password", type="password")
+                
+                submit = st.form_submit_button("Delete My Account")
+                
+                if submit:
+                    if confirm_text != "DELETE":
+                        st.error("Please type 'DELETE' to confirm!")
+                    elif not password:
+                        st.error("Please enter your password!")
+                    else:
+                        # Verify password
+                        conn = sqlite3.connect(get_db_path())
+                        c = conn.cursor()
+                        
+                        c.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,))
+                        stored_hash = c.fetchone()[0]
+                        
+                        if verify_password(password, stored_hash):
+                            # Delete the account
+                            conn.close()
+                            if delete_user(user_id):
+                                # Clear session state and redirect to login
+                                for key in st.session_state.keys():
+                                    del st.session_state[key]
+                                st.success("Your account has been deleted.")
+                                st.rerun()
+                            else:
+                                st.error("Failed to delete account!")
+                        else:
+                            conn.close()
+                            st.error("Incorrect password!")
     
-    with st.form("budget_form"):
-        new_budget = st.number_input(
-            "Set Monthly Budget", 
-            min_value=0.0, 
-            value=float(current_budget) if current_budget else 0.0,
-            format="%.2f"
-        )
+    # Tab 2: Preferences
+    with tab2:
+        st.subheader("Preferences")
         
-        submit = st.form_submit_button("Update Budget")
+        # Set monthly budget
+        current_budget = get_budget(user_id)
         
-        if submit:
-            if set_budget(user_id, new_budget):
-                st.success("Budget updated successfully!")
-            else:
-                st.error("Failed to update budget!")
+        with st.form("budget_form"):
+            budget_amount = st.number_input(
+                "Set Monthly Budget", 
+                min_value=0.0, 
+                value=float(current_budget) if current_budget else 0.0,
+                format="%.2f"
+            )
+            
+            submit = st.form_submit_button("Save Budget")
+            
+            if submit:
+                if set_budget(user_id, budget_amount):
+                    st.success("Budget updated successfully!")
+                else:
+                    st.error("Failed to update budget!")
 
-# Main App Logic
+# Main app logic
 def main():
-    # Initialize session state
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
-        st.session_state['user_id'] = None
-        st.session_state['username'] = None
+    # Initialize the database
+    init_db()
     
-    # Display the appropriate page based on login status
-    if st.session_state['logged_in']:
-        show_dashboard(st.session_state['user_id'], st.session_state['username'])
+    # Check if user is logged in
+    if not st.session_state.get('logged_in', False):
+        show_login_page()
     else:
-        show_landing_page()
+        # User is logged in, show dashboard
+        show_dashboard(
+            st.session_state['user_id'],
+            st.session_state['username'],
+            st.session_state['is_admin']
+        )
 
 if __name__ == "__main__":
     main()
