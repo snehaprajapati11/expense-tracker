@@ -621,75 +621,94 @@ def show_dashboard_page(user_id):
         
         styled_df = recent_df[['date', 'type', 'amount', 'category', 'note']].style.apply(highlight_rows, axis=1)
         st.dataframe(styled_df, use_container_width=True)
+def get_user_transactions(user_id):
+    """
+    Retrieve all transactions for a specific user from the database.
+    
+    Parameters:
+    user_id (int): The ID of the user whose transactions to retrieve
+    
+    Returns:
+    pandas.DataFrame: DataFrame containing the user's transactions
+"""
+    conn = sqlite3.connect('expense_tracker.db')
+    
+    # Query to get all transactions for the specified user
+    query = """
+    SELECT 
+        t.id, 
+        t.date, 
+        t.description, 
+        t.amount, 
+        c.name as category
+    FROM 
+        transactions t
+    JOIN 
+        categories c ON t.category_id = c.id
+    WHERE 
+        t.user_id = ?
+    ORDER BY 
+        t.date DESC
+    """
+    
+    # Execute query and load results into a DataFrame
+    transactions_df = pd.read_sql(query, conn, params=(user_id,))
+    
+    conn.close()
+    
+    return transactions_df
+
 
 def show_transactions_page(user_id):
-    """Show all transactions with filtering options"""
-    st.title("Transactions")
+    st.header("Transactions")
     
-    # Date filters
-    col1, col2 = st.columns(2)
-    with col1:
-        start_date = st.date_input("Start Date", datetime.now().replace(day=1))
-    with col2:
-        end_date = st.date_input("End Date", datetime.now())
+    # Retrieve all transactions for the user
+    transactions_df = get_user_transactions(user_id)
     
-    # Convert to string format for SQLite
-    start_date_str = start_date.strftime('%Y-%m-%d')
-    end_date_str = end_date.strftime('%Y-%m-%d')
+    # Add a new transaction form
+    with st.expander("Add New Transaction"):
+        with st.form("new_transaction_form"):
+            date = st.date_input("Date")
+            description = st.text_input("Description")
+            amount = st.number_input("Amount", min_value=0.01, step=0.01)
+            category = st.selectbox("Category", get_categories())
+            
+            submitted = st.form_submit_button("Add Transaction")
+            if submitted:
+                add_transaction(user_id, date, description, amount, category)
+                st.success("Transaction added successfully!")
+                st.experimental_rerun()
     
-    # Get filtered transactions
-    transactions_df = get_transactions(user_id, start_date_str, end_date_str)
-    
-    # Add delete button functionality
+    # Display all transactions in a table
     if not transactions_df.empty:
-        # Add a column for delete buttons
-        transactions_display = transactions_df.copy()
-        transactions_display['amount'] = transactions_display.apply(
-            lambda x: f"${x['amount']:.2f}" if x['type'] == 'income' else f"-${x['amount']:.2f}", 
-            axis=1
-        )
-        transactions_display['date'] = transactions_display['date'].dt.strftime('%Y-%m-%d')
-        
-        # Color-code transaction types
-        def highlight_rows(row):
-            if row['type'] == 'income':
-                return ['background-color: rgba(46, 204, 113, 0.2)']*len(row)
-            else:
-                return ['background-color: rgba(231, 76, 60, 0.2)']*len(row)
-        
-        styled_df = transactions_display[['date', 'type', 'amount', 'category', 'note']].style.apply(highlight_rows, axis=1)
-        st.dataframe(styled_df, use_container_width=True)
+        st.subheader("Your Transactions")
+        st.dataframe(transactions_df[['date', 'description', 'amount', 'category']])
         
         # Delete transaction option
         with st.expander("Delete a Transaction"):
+            # Define a formatter function for transaction display
+            def format_transaction(transaction_id):
+                # Get the row that matches this transaction ID
+                row = transactions_df[transactions_df['id'] == transaction_id].iloc[0]
+                
+                # Convert numpy.datetime64 to pandas datetime and format it
+                date_str = pd.to_datetime(row['date']).strftime('%Y-%m-%d')
+                
+                # Format the entire string with date, description and amount
+                return f"{date_str} - {row['description']} (${float(row['amount']):.2f})"
+            
             transaction_to_delete = st.selectbox(
-                "Select transaction to delete", 
+                "Select transaction to delete",
                 transactions_df['id'].tolist(),
-                format_func=lambda x: f"{transactions_df[transactions_df['id'] == x]['date'].values[0].strftime('%Y-%m-%d')} - {transactions_df[transactions_df['id'] == x]['category'].values[0]} - ${transactions_df[transactions_df['id'] == x]['amount'].values[0]:.2f}"
+                format_func=format_transaction
             )
             
             if st.button("Delete Transaction"):
-                if delete_transaction(transaction_to_delete):
-                    st.success("Transaction deleted successfully!")
-                    st.rerun()
-                else:
-                    st.error("Failed to delete transaction!")
-        
-        # Export to CSV
-        if st.button("Export to CSV"):
-            csv = io.StringIO()
-            export_df = transactions_display[['date', 'type', 'amount', 'category', 'note']]
-            export_df.to_csv(csv, index=False)
-            
-            st.download_button(
-                label="Download CSV",
-                data=csv.getvalue(),
-                file_name=f"transactions_{start_date_str}_to_{end_date_str}.csv",
-                mime="text/csv"
-            )
+                delete_transaction(transaction_to_delete)
+                st.success("Transaction deleted successfully!")
+                st.experimental_rerun()
     else:
-        st.info("No transactions found for the selected date range.")
-
+        st.info("No transactions found. Add your first transaction above.")
 def show_reports_page(user_id):
     """Show reports and analytics"""
     st.title("Reports & Analytics")
