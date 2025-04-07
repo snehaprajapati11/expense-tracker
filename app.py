@@ -550,17 +550,17 @@ def show_dashboard_page(user_id):
     # Display summary cards
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Income", f"${total_income:.2f}", delta=None)
+        st.metric("Total Income", f"Rs{total_income:.2f}", delta=None)
     with col2:
-        st.metric("Total Expenses", f"${total_expenses:.2f}", delta=None)
+        st.metric("Total Expenses", f"{total_expenses:.2f}", delta=None)
     with col3:
-        st.metric("Balance", f"${balance:.2f}", delta=None)
+        st.metric("Balance", f"Rs{balance:.2f}", delta=None)
     
     # Budget warning
     if budget and total_expenses > budget:
-        st.warning(f"⚠️ You've exceeded your monthly budget by ${total_expenses - budget:.2f}")
+        st.warning(f"⚠️ You've exceeded your monthly budget by Rs{total_expenses - budget:.2f}")
     elif budget:
-        st.success(f"You're within your monthly budget. Remaining: ${budget - total_expenses:.2f}")
+        st.success(f"You're within your monthly budget. Remaining: Rs{budget - total_expenses:.2f}")
     
     # Add new transaction form
     st.subheader("Add New Transaction")
@@ -607,7 +607,7 @@ def show_dashboard_page(user_id):
         # Show the 5 most recent transactions
         recent_df = transactions_df.head(5).copy()
         recent_df['amount'] = recent_df.apply(
-            lambda x: f"${x['amount']:.2f}" if x['type'] == 'income' else f"-${x['amount']:.2f}", 
+            lambda x: f"Rs{x['amount']:.2f}" if x['type'] == 'income' else f"-Rs{x['amount']:.2f}", 
             axis=1
         )
         recent_df['date'] = recent_df['date'].dt.strftime('%Y-%m-%d')
@@ -705,7 +705,7 @@ def show_transactions_page(user_id):
         display_df = transactions_df.copy()
         display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
         display_df['formatted_amount'] = display_df.apply(
-            lambda x: f"${x['amount']:.2f}" if x['type'] == 'income' else f"-${x['amount']:.2f}", 
+            lambda x: f"Rs{x['amount']:.2f}" if x['type'] == 'income' else f"-Rs{x['amount']:.2f}", 
             axis=1
         )
         
@@ -728,7 +728,7 @@ def show_transactions_page(user_id):
                 
                 # Format the entire string with date, category and amount
                 date_str = row['date'].strftime('%Y-%m-%d')
-                amount_str = f"${float(row['amount']):.2f}"
+                amount_str = f"Rs{float(row['amount']):.2f}"
                 return f"{date_str} - {row['category']} ({amount_str})"
             
             transaction_to_delete = st.selectbox(
@@ -773,11 +773,11 @@ def show_reports_page(user_id):
     # Display summary cards
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Total Income", f"${total_income:.2f}")
+        st.metric("Total Income", f"Rs{total_income:.2f}")
     with col2:
-        st.metric("Total Expenses", f"${total_expenses:.2f}")
+        st.metric("Total Expenses", f"Rs{total_expenses:.2f}")
     with col3:
-        st.metric("Balance", f"${balance:.2f}")
+        st.metric("Balance", f"Rs{balance:.2f}")
     
     # Expenses by category
     st.subheader("Expense Distribution by Category")
@@ -885,9 +885,9 @@ def show_admin_panel():
                     
                     with col2:
                         st.markdown(f"**Transactions:** {row['transaction_count']}")
-                        st.markdown(f"**Total Expenses:** ${row['total_expenses']:.2f}")
-                        st.markdown(f"**Total Income:** ${row['total_income']:.2f}")
-                        st.markdown(f"**Budget:** ${row['budget']:.2f}")
+                        st.markdown(f"**Total Expenses:** Rs{row['total_expenses']:.2f}")
+                        st.markdown(f"**Total Income:** Rs{row['total_income']:.2f}")
+                        st.markdown(f"**Budget:** Rs{row['budget']:.2f}")
                     
                     with col3:
                         if row['username'] != 'admin':  # Prevent modifying the default admin
@@ -1070,8 +1070,8 @@ def show_admin_panel():
             st.metric("Total Transactions", transaction_count)
         
         with col2:
-            st.metric("Total System Expenses", f"${total_expenses:.2f}")
-            st.metric("Total System Income", f"${total_income:.2f}")
+            st.metric("Total System Expenses", f"Rs{total_expenses:.2f}")
+            st.metric("Total System Income", f"Rs{total_income:.2f}")
         
         with col3:
             st.metric("Total Categories", category_count)
